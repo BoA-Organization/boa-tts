@@ -1,11 +1,12 @@
 import asyncio
+import base64
 import json
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.config import settings
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 class TTSRequest(BaseModel):
     text: str
+
+
+class TTSResponse(BaseModel):
+    audio_base64: str
+    media_type: str = "audio/wav"
 
 
 @asynccontextmanager
@@ -98,8 +104,13 @@ def swagger_ui() -> HTMLResponse:
             throw new Error(message);
           }}
 
+          const result = await response.json();
+          const binary = atob(result.audio_base64);
+          const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
           if (currentAudioUrl) URL.revokeObjectURL(currentAudioUrl);
-          currentAudioUrl = URL.createObjectURL(await response.blob());
+          currentAudioUrl = URL.createObjectURL(
+            new Blob([bytes], {{type: result.media_type}})
+          );
           audio.src = currentAudioUrl;
           audio.style.display = 'block';
           status.textContent = 'Ready to play';
@@ -131,8 +142,8 @@ def ready() -> dict:
     return statuses
 
 
-@app.post("/tts/{lang}")
-async def tts(lang: str, payload: TTSRequest) -> Response:
+@app.post("/tts/{lang}", response_model=TTSResponse)
+async def tts(lang: str, payload: TTSRequest) -> TTSResponse:
     try:
         service = svc_registry.get(lang)
     except KeyError as kerr:
@@ -156,4 +167,4 @@ async def tts(lang: str, payload: TTSRequest) -> Response:
     if not wav_bytes:
         raise HTTPException(status_code=400, detail="Input produced no audio")
 
-    return Response(content=wav_bytes, media_type="audio/wav")
+    return TTSResponse(audio_base64=base64.b64encode(wav_bytes).decode("ascii"))
