@@ -1,10 +1,15 @@
 import os
 from pathlib import Path
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     app_name: str = "BOA TTS Service"
+
+    # "local" runs the OmniVoice model on the GPU; "gemini" calls the Gemini API
+    tts_provider: Literal["local", "gemini"] = "local"
 
     hf_home: str = "/models/hf_cache"
     model_cache_dir: str = "/models/cache"
@@ -25,6 +30,13 @@ class Settings(BaseSettings):
     )
     amharic_tts_chunk_chars: int = 140
     amharic_tts_chunk_pause_ms: int = 120
+
+    gemini_api_key: str = ""
+    gemini_tts_model: str = "gemini-3.8-flash-tts"
+    # Prebuilt voice name (e.g. "Kore") or a cloned voice ID (voice_...)
+    gemini_tts_voice: str = "Kore"
+    # Empty lets Gemini detect the language from the text
+    gemini_tts_language_code: str = ""
 
     request_timeout_seconds: int = 300
 
