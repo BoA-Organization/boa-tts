@@ -8,8 +8,9 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_name: str = "BOA TTS Service"
 
-    # "local" runs the OmniVoice model on the GPU; "gemini" calls the Gemini API
-    tts_provider: Literal["local", "gemini"] = "local"
+    # "local" runs the OmniVoice model on the GPU; "gemini" calls the Gemini
+    # API; "openrouter" calls Gemini TTS through OpenRouter
+    tts_provider: Literal["local", "gemini", "openrouter"] = "local"
 
     hf_home: str = "/models/hf_cache"
     model_cache_dir: str = "/models/cache"
@@ -37,6 +38,13 @@ class Settings(BaseSettings):
     gemini_tts_voice: str = "Kore"
     # Empty lets Gemini detect the language from the text
     gemini_tts_language_code: str = ""
+
+    openrouter_api_key: str = ""
+    openrouter_tts_model: str = "google/gemini-3.8-flash-tts"
+    # Prebuilt voice name only; cloned voices are not available via OpenRouter
+    openrouter_tts_voice: str = "Kore"
+    # Optional delivery directions (tone, pace), e.g. "calm and clear"
+    openrouter_tts_instructions: str = ""
 
     request_timeout_seconds: int = 300
 

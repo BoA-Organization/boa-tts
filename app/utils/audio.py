@@ -1,9 +1,14 @@
 import io
 import logging
+import re
 import subprocess
+import wave
 
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
+
+# Gemini TTS emits 24 kHz mono signed 16-bit PCM
+_DEFAULT_PCM_RATE = 24000
 
 
 def bytes_to_audio_segment(audio_bytes: bytes) -> AudioSegment:
@@ -78,3 +83,19 @@ def export_wav(audio: AudioSegment) -> bytes:
     out_buf = io.BytesIO()
     audio.export(out_buf, format="wav")
     return out_buf.getvalue()
+
+
+def pcm_to_wav(data: bytes, mime_type: str) -> bytes:
+    """Return WAV bytes, wrapping raw PCM (audio/L16;rate=...) in a WAV header."""
+    if data.startswith(b"RIFF"):
+        return data
+
+    match = re.search(r"rate=(\d+)", mime_type)
+    rate = int(match.group(1)) if match else _DEFAULT_PCM_RATE
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)  # signed 16-bit little-endian
+        wav.setframerate(rate)
+        wav.writeframes(data)
+    return buffer.getvalue()

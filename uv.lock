@@ -134,6 +134,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "google-genai" },
+    { name = "httpx" },
     { name = "num2words" },
     { name = "omnivoice" },
     { name = "pydantic-settings" },
@@ -152,6 +153,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.139.0" },
     { name = "google-genai", specifier = ">=2.25.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "num2words", specifier = ">=0.5.14" },
     { name = "omnivoice", specifier = ">=0.2.0" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },

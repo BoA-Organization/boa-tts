@@ -5,6 +5,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.139.0",
     "google-genai>=2.25.0",
+    "httpx>=0.28.1",
     "num2words>=0.5.14",
     "omnivoice>=0.2.0",
     "pydantic-settings>=2.14.2",

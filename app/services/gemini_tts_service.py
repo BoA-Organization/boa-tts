@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import io
 import logging
-import re
-import wave
 
 from google import genai
 from google.genai import types
 
 from app.config import settings
 from app.services.base import BaseTTSService
+from app.utils.audio import pcm_to_wav
 
 logger = logging.getLogger(__name__)
 
 # Custom voices from `voices.create`: stored (voice_...) or client-held (voicekey_...)
 _CUSTOM_VOICE_PREFIXES = ("voice_", "voicekey_")
-_DEFAULT_PCM_RATE = 24000
 
 
 class GeminiTTSService(BaseTTSService):
@@ -99,23 +96,7 @@ class GeminiTTSService(BaseTTSService):
             for part in (candidate.content.parts if candidate.content else None) or []:
                 blob = part.inline_data
                 if blob and blob.data:
-                    return _as_wav(blob.data, blob.mime_type or "")
+                    return pcm_to_wav(blob.data, blob.mime_type or "")
 
         reason = response.candidates[0].finish_reason if response.candidates else None
         raise RuntimeError(f"Gemini returned no audio (finish reason: {reason})")
-
-
-def _as_wav(data: bytes, mime_type: str) -> bytes:
-    """Return WAV bytes, wrapping raw PCM (audio/L16;rate=...) in a WAV header."""
-    if data.startswith(b"RIFF"):
-        return data
-
-    match = re.search(r"rate=(\d+)", mime_type)
-    rate = int(match.group(1)) if match else _DEFAULT_PCM_RATE
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)  # signed 16-bit little-endian
-        wav.setframerate(rate)
-        wav.writeframes(data)
-    return buffer.getvalue()

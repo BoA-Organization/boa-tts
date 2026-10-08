@@ -1,7 +1,8 @@
 """
 Service registry wiring.
 
-TTS_PROVIDER selects the backend: "local" (OmniVoice on the GPU) or "gemini".
+TTS_PROVIDER selects the backend: "local" (OmniVoice on the GPU), "gemini" or
+"openrouter".
 
 To add a new language:
   1. Create app/services/<lang>_tts_service.py with a subclass of BaseTTSService.
@@ -15,6 +16,10 @@ if settings.tts_provider == "gemini":
     from app.services.gemini_tts_service import GeminiTTSService
 
     registry.register("am", GeminiTTSService())
+elif settings.tts_provider == "openrouter":
+    from app.services.openrouter_tts_service import OpenRouterTTSService
+
+    registry.register("am", OpenRouterTTSService())
 else:
     from app.services.amharic_tts_service import AmharicTTSService
 
