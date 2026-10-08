@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 class TTSRequest(BaseModel):
     text: str
+    # Delivery directions for this clip (tone, pace, emotion), e.g. "warm and
+    # inviting". Overrides TTS_INSTRUCTIONS; the local provider ignores it.
+    instructions: str | None = None
 
 
 class TTSResponse(BaseModel):
@@ -65,6 +68,10 @@ def swagger_ui() -> HTMLResponse:
           <textarea id="tts-text" required rows="3" style="display: block; width: 100%;
             margin-top: 5px; box-sizing: border-box;"></textarea>
         </label>
+        <label style="display: block; margin-bottom: 10px;">Instructions (optional)
+          <input id="tts-instructions" placeholder="e.g. warm and inviting"
+            style="display: block; width: 100%; margin-top: 5px; box-sizing: border-box;">
+        </label>
         <button type="submit" style="padding: 8px 18px; cursor: pointer;">
           Generate audio
         </button>
@@ -93,7 +100,10 @@ def swagger_ui() -> HTMLResponse:
           const response = await fetch(`/tts/${{encodeURIComponent(languageSelect.value)}}`, {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{text: document.getElementById('tts-text').value}}),
+            body: JSON.stringify({{
+              text: document.getElementById('tts-text').value,
+              instructions: document.getElementById('tts-instructions').value || null,
+            }}),
           }});
           if (!response.ok) {{
             let message = `Request failed (${{response.status}})`;
@@ -159,7 +169,9 @@ async def tts(lang: str, payload: TTSRequest) -> TTSResponse:
         )
 
     try:
-        wav_bytes = await asyncio.to_thread(service.generate, payload.text)
+        wav_bytes = await asyncio.to_thread(
+            service.generate, payload.text, payload.instructions
+        )
     except Exception as exc:
         logger.exception("TTS failed for language: %s", lang)
         raise HTTPException(status_code=500, detail="TTS processing failed") from exc

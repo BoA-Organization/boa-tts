@@ -13,5 +13,9 @@ class BaseTTSService(ABC):
         """Load the model and any required assets. Called once at startup."""
 
     @abstractmethod
-    def generate(self, text: str) -> bytes:
-        """Synthesize speech from text and return raw WAV bytes."""
+    def generate(self, text: str, instructions: str | None = None) -> bytes:
+        """Synthesize speech from text and return raw WAV bytes.
+
+        `instructions` are delivery directions (tone, pace, emotion) for
+        providers that support them; others ignore them.
+        """

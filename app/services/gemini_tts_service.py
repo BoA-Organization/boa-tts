@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import logging
+from collections.abc import Iterator
 
 from google import genai
 from google.genai import types
@@ -11,12 +13,14 @@ from app.utils.audio import pcm_to_wav
 
 logger = logging.getLogger(__name__)
 
-# Custom voices from `voices.create`: stored (voice_...) or client-held (voicekey_...)
-_CUSTOM_VOICE_PREFIXES = ("voice_", "voicekey_")
+_SAMPLE_RATE = 24000
 
 
 class GeminiTTSService(BaseTTSService):
     """Speech synthesis through the Gemini API.
+
+    Uses the Interactions API, the one that takes a speech style
+    (`instructions`); its audio stream is collected into one clip.
 
     `GEMINI_TTS_VOICE` is either a prebuilt voice name (e.g. "Kore") or the
     ID of a cloned voice created with `scripts/create_gemini_voice.py`.
@@ -42,6 +46,9 @@ class GeminiTTSService(BaseTTSService):
                 timeout=settings.request_timeout_seconds * 1000
             ),
         )
+        # The SDK builds the Interactions client on first access (~1.5 s);
+        # do it now rather than on the first request.
+        _ = self.client.interactions
         self.ready = True
         logger.info(
             "Gemini TTS ready (model %s, voice %s)",
@@ -53,7 +60,7 @@ class GeminiTTSService(BaseTTSService):
     # Public API (satisfies BaseTTSService)
     # ------------------------------------------------------------------
 
-    def generate(self, text: str) -> bytes:
+    def generate(self, text: str, instructions: str | None = None) -> bytes:
         if not self.ready or self.client is None:
             raise RuntimeError("Gemini TTS client is not initialized")
 
@@ -63,40 +70,45 @@ class GeminiTTSService(BaseTTSService):
         if not text:
             return b""
 
-        response = self.client.models.generate_content(
+        speech_config = {"voice": settings.gemini_tts_voice}
+        if settings.gemini_tts_language_code:
+            speech_config["language"] = settings.gemini_tts_language_code
+
+        content = {"type": "text", "text": text}
+        if style := instructions or settings.tts_instructions:
+            content["annotations"] = [{"type": "speech_metadata", "style": style}]
+
+        events = self.client.interactions.create(
             model=settings.gemini_tts_model,
-            contents=text,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=self._speech_config(),
-            ),
+            input=[{"type": "user_input", "content": [content]}],
+            response_format={
+                "type": "audio",
+                "mime_type": "audio/l16",
+                "sample_rate": _SAMPLE_RATE,
+            },
+            generation_config={"speech_config": [speech_config]},
+            stream=True,
         )
-        return self._extract_wav(response)
+        chunks = list(_audio_chunks(events))
+        if not chunks:
+            raise RuntimeError("Gemini returned no audio")
+        sample_rate = chunks[0][0]
+        return pcm_to_wav(b"".join(data for _, data in chunks), f"rate={sample_rate}")
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
 
-    def _speech_config(self) -> types.SpeechConfig:
-        voice = settings.gemini_tts_voice
-        if voice.startswith(_CUSTOM_VOICE_PREFIXES):
-            voice_config = types.VoiceConfig(voice=voice)
-        else:
-            voice_config = types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
-            )
-        return types.SpeechConfig(
-            voice_config=voice_config,
-            language_code=settings.gemini_tts_language_code or None,
-        )
-
-    @staticmethod
-    def _extract_wav(response: types.GenerateContentResponse) -> bytes:
-        for candidate in response.candidates or []:
-            for part in (candidate.content.parts if candidate.content else None) or []:
-                blob = part.inline_data
-                if blob and blob.data:
-                    return pcm_to_wav(blob.data, blob.mime_type or "")
-
-        reason = response.candidates[0].finish_reason if response.candidates else None
-        raise RuntimeError(f"Gemini returned no audio (finish reason: {reason})")
+def _audio_chunks(events) -> Iterator[tuple[int, bytes]]:
+    """Yield (sample rate, PCM) for each audio delta; raise on an error event."""
+    try:
+        for event in events:
+            if event.event_type == "error":
+                error = event.error
+                raise RuntimeError(
+                    f"Gemini TTS stream failed: {error.message if error else event}"
+                )
+            if event.event_type != "step.delta" or event.delta.type != "audio":
+                continue
+            if event.delta.data:
+                rate = event.delta.sample_rate or _SAMPLE_RATE
+                yield rate, base64.b64decode(event.delta.data)
+    finally:
+        events.close()

@@ -53,7 +53,7 @@ class OpenRouterTTSService(BaseTTSService):
     # Public API (satisfies BaseTTSService)
     # ------------------------------------------------------------------
 
-    def generate(self, text: str) -> bytes:
+    def generate(self, text: str, instructions: str | None = None) -> bytes:
         if not self.ready or self.client is None:
             raise RuntimeError("OpenRouter TTS client is not initialized")
 
@@ -69,8 +69,8 @@ class OpenRouterTTSService(BaseTTSService):
             # Gemini TTS on OpenRouter rejects anything but raw PCM
             "response_format": "pcm",
         }
-        if settings.openrouter_tts_instructions:
-            payload["instructions"] = settings.openrouter_tts_instructions
+        if style := instructions or settings.tts_instructions:
+            payload["instructions"] = style
 
         response = self.client.post(_SPEECH_URL, json=payload)
         if response.is_error:

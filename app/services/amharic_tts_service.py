@@ -74,7 +74,8 @@ class AmharicTTSService(BaseTTSService):
     # Public API (satisfies BaseTTSService)
     # ------------------------------------------------------------------
 
-    def generate(self, text: str) -> bytes:
+    def generate(self, text: str, instructions: str | None = None) -> bytes:
+        # OmniVoice has no delivery directions; instructions are ignored.
         if not self.ready:
             raise RuntimeError("TTS model is not loaded")
 

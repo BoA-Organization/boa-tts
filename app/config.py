@@ -43,8 +43,10 @@ class Settings(BaseSettings):
     openrouter_tts_model: str = "google/gemini-3.8-flash-tts"
     # Prebuilt voice name only; cloned voices are not available via OpenRouter
     openrouter_tts_voice: str = "Kore"
-    # Optional delivery directions (tone, pace), e.g. "calm and clear"
-    openrouter_tts_instructions: str = ""
+
+    # Default delivery directions (tone, pace) for the gemini and openrouter
+    # providers, e.g. "calm and clear"; a request's `instructions` override it
+    tts_instructions: str = ""
 
     request_timeout_seconds: int = 300
 
