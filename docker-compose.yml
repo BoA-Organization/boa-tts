@@ -4,7 +4,10 @@ services:
     container_name: boa-tts
     restart: unless-stopped
     ports:
-      - "11436:8000"
+      - "11435:8000"
+    networks:
+      tts_net:
+        ipv4_address: 192.168.250.10
     env_file:
       - .env
     environment:
@@ -31,6 +34,14 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s   # model loading takes time
+
+# Pin the subnet: Docker's default pool hands out 172.x/16 ranges, which can
+# swallow LAN clients in 172.x (e.g. 172.20.18.210) and break return routing.
+networks:
+  tts_net:
+    ipam:
+      config:
+        - subnet: 192.168.250.0/24
 
 volumes:
   hf_cache:
