@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import random
+import threading
+import time
 
 import httpx
 
@@ -12,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 _SPEECH_URL = "https://openrouter.ai/api/v1/audio/speech"
 
+# Statuses worth another attempt: timeouts, rate limits, upstream failures
+# (524 is Cloudflare's "origin timed out")
+_RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504, 524}
+_MAX_BACKOFF_SECONDS = 10.0
+
 
 class OpenRouterTTSService(BaseTTSService):
     """Speech synthesis through OpenRouter's /audio/speech endpoint.
@@ -22,6 +30,7 @@ class OpenRouterTTSService(BaseTTSService):
 
     def __init__(self) -> None:
         self.client: httpx.Client | None = None
+        self.slots: threading.BoundedSemaphore | None = None
         self.ready = False
 
     # ------------------------------------------------------------------
@@ -40,13 +49,17 @@ class OpenRouterTTSService(BaseTTSService):
 
         self.client = httpx.Client(
             headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-            timeout=settings.request_timeout_seconds,
+            timeout=httpx.Timeout(
+                settings.openrouter_attempt_timeout_seconds, connect=10.0
+            ),
         )
+        self.slots = threading.BoundedSemaphore(settings.openrouter_max_concurrency)
         self.ready = True
         logger.info(
-            "OpenRouter TTS ready (model %s, voice %s)",
+            "OpenRouter TTS ready (model %s, voice %s, concurrency %d)",
             settings.openrouter_tts_model,
             settings.openrouter_tts_voice,
+            settings.openrouter_max_concurrency,
         )
 
     # ------------------------------------------------------------------
@@ -54,7 +67,7 @@ class OpenRouterTTSService(BaseTTSService):
     # ------------------------------------------------------------------
 
     def generate(self, text: str, instructions: str | None = None) -> bytes:
-        if not self.ready or self.client is None:
+        if not self.ready or self.client is None or self.slots is None:
             raise RuntimeError("OpenRouter TTS client is not initialized")
 
         # No normalize_text_for_tts: Gemini reads numbers natively.
@@ -72,12 +85,56 @@ class OpenRouterTTSService(BaseTTSService):
         if style := instructions or settings.tts_instructions:
             payload["instructions"] = style
 
-        response = self.client.post(_SPEECH_URL, json=payload)
-        if response.is_error:
-            raise RuntimeError(
-                f"OpenRouter TTS failed ({response.status_code}): {response.text[:500]}"
-            )
+        with self.slots:
+            response = self._post_with_retries(payload)
         if not response.content:
             raise RuntimeError("OpenRouter returned no audio")
 
         return pcm_to_wav(response.content, response.headers.get("content-type", ""))
+
+    def _post_with_retries(self, payload: dict) -> httpx.Response:
+        """POST the request, retrying timeouts and transient upstream errors."""
+        attempts = settings.openrouter_max_retries + 1
+        for attempt in range(1, attempts + 1):
+            started = time.monotonic()
+            retry_after: str | None = None
+            try:
+                response = self.client.post(_SPEECH_URL, json=payload)
+            except httpx.TransportError as exc:  # includes timeouts
+                failure = f"{type(exc).__name__}: {exc}"
+            else:
+                if not response.is_error:
+                    logger.info(
+                        "OpenRouter TTS took %.1fs (attempt %d)",
+                        time.monotonic() - started,
+                        attempt,
+                    )
+                    return response
+                failure = f"{response.status_code}: {response.text[:500]}"
+                if response.status_code not in _RETRYABLE_STATUSES:
+                    raise RuntimeError(f"OpenRouter TTS failed ({failure})")
+                retry_after = response.headers.get("retry-after")
+
+            if attempt == attempts:
+                raise RuntimeError(
+                    f"OpenRouter TTS failed after {attempts} attempts ({failure})"
+                )
+            delay = _backoff_seconds(attempt, retry_after)
+            logger.warning(
+                "OpenRouter TTS attempt %d/%d failed after %.1fs (%s); "
+                "retrying in %.1fs",
+                attempt,
+                attempts,
+                time.monotonic() - started,
+                failure,
+                delay,
+            )
+            time.sleep(delay)
+        raise AssertionError("unreachable")
+
+
+def _backoff_seconds(attempt: int, retry_after: str | None) -> float:
+    """Honor a numeric Retry-After, else exponential backoff with jitter."""
+    if retry_after and retry_after.isdigit():
+        return min(float(retry_after), _MAX_BACKOFF_SECONDS)
+    return min(2 ** (attempt - 1), _MAX_BACKOFF_SECONDS) + random.uniform(0, 1)  # noqa: S311

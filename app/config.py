@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     openrouter_tts_model: str = "google/gemini-3.8-flash-tts"
     # Prebuilt voice name only; cloned voices are not available via OpenRouter
     openrouter_tts_voice: str = "Kore"
+    # Upstream calls in flight at once; extra requests wait for a free slot
+    openrouter_max_concurrency: int = 4
+    # Each attempt is cut off after this long, then retried
+    openrouter_attempt_timeout_seconds: int = 60
+    # Extra attempts after a timeout, 408, 429 or 5xx
+    openrouter_max_retries: int = 2
 
     # Default delivery directions (tone, pace) for the gemini and openrouter
     # providers, e.g. "calm and clear"; a request's `instructions` override it
