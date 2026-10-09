@@ -4,12 +4,13 @@ import logging
 import random
 import threading
 import time
+from collections.abc import Iterator
 
 import httpx
 
 from app.config import settings
 from app.services.base import BaseTTSService
-from app.utils.audio import pcm_to_wav
+from app.utils.audio import pcm_chunks_to_wav, pcm_rate
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +68,18 @@ class OpenRouterTTSService(BaseTTSService):
     # ------------------------------------------------------------------
 
     def generate(self, text: str, instructions: str | None = None) -> bytes:
+        return pcm_chunks_to_wav(self.stream(text, instructions))
+
+    def stream(
+        self, text: str, instructions: str | None = None
+    ) -> Iterator[tuple[int, bytes]]:
         if not self.ready or self.client is None or self.slots is None:
             raise RuntimeError("OpenRouter TTS client is not initialized")
 
         # No normalize_text_for_tts: Gemini reads numbers natively.
         text = text.strip()
         if not text:
-            return b""
+            return
 
         payload = {
             "model": settings.openrouter_tts_model,
@@ -85,27 +91,42 @@ class OpenRouterTTSService(BaseTTSService):
         if style := instructions or settings.tts_instructions:
             payload["instructions"] = style
 
+        # OpenRouter sends the PCM in chunks, but only once the whole clip is
+        # generated, so this mainly saves the client waiting for the transfer.
         with self.slots:
-            response = self._post_with_retries(payload)
-        if not response.content:
+            response = self._open_with_retries(payload)
+            try:
+                rate = pcm_rate(response.headers.get("content-type", ""))
+                received = False
+                for data in response.iter_bytes():
+                    received = True
+                    yield rate, data
+            finally:
+                response.close()
+        if not received:
             raise RuntimeError("OpenRouter returned no audio")
 
-        return pcm_to_wav(response.content, response.headers.get("content-type", ""))
-
-    def _post_with_retries(self, payload: dict) -> httpx.Response:
-        """POST the request, retrying timeouts and transient upstream errors."""
+    def _open_with_retries(self, payload: dict) -> httpx.Response:
+        """Send the request and return the open response once its headers
+        arrive, retrying timeouts and transient upstream errors."""
+        request = self.client.build_request("POST", _SPEECH_URL, json=payload)
         attempts = settings.openrouter_max_retries + 1
         for attempt in range(1, attempts + 1):
             started = time.monotonic()
             retry_after: str | None = None
             try:
-                response = self.client.post(_SPEECH_URL, json=payload)
+                response = self.client.send(request, stream=True)
+                if response.is_error:
+                    try:
+                        response.read()  # the error message
+                    finally:
+                        response.close()
             except httpx.TransportError as exc:  # includes timeouts
                 failure = f"{type(exc).__name__}: {exc}"
             else:
                 if not response.is_error:
                     logger.info(
-                        "OpenRouter TTS took %.1fs (attempt %d)",
+                        "OpenRouter TTS responded in %.1fs (attempt %d)",
                         time.monotonic() - started,
                         attempt,
                     )

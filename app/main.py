@@ -1,17 +1,21 @@
 import asyncio
 import base64
+import contextlib
 import json
 import logging
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from typing import Literal, Self
 
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from pydantic import BaseModel, model_validator
 
 from app.config import settings
 from app.services import registry  # noqa: F401 — triggers __init__ registration
 from app.services import registry as svc_registry
+from app.services.base import BaseTTSService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +29,17 @@ class TTSRequest(BaseModel):
     # Delivery directions for this clip (tone, pace, emotion), e.g. "warm and
     # inviting". Overrides TTS_INSTRUCTIONS; the local provider ignores it.
     instructions: str | None = None
+    # "wav" answers JSON with a base64 WAV clip. "pcm" answers raw signed
+    # 16-bit mono PCM, with its rate in the X-Sample-Rate header.
+    format: Literal["wav", "pcm"] = "wav"
+    # Send the PCM as it is synthesized instead of once the clip is done
+    stream: bool = False
+
+    @model_validator(mode="after")
+    def _stream_needs_pcm(self) -> Self:
+        if self.stream and self.format != "pcm":
+            raise ValueError("stream=true requires format=pcm")
+        return self
 
 
 class TTSResponse(BaseModel):
@@ -153,7 +168,7 @@ def ready() -> dict:
 
 
 @app.post("/tts/{lang}", response_model=TTSResponse)
-async def tts(lang: str, payload: TTSRequest) -> TTSResponse:
+async def tts(lang: str, payload: TTSRequest) -> TTSResponse | Response:
     try:
         service = svc_registry.get(lang)
     except KeyError as kerr:
@@ -168,6 +183,9 @@ async def tts(lang: str, payload: TTSRequest) -> TTSResponse:
             status_code=503, detail=f"TTS service for '{lang}' is not ready"
         )
 
+    if payload.format == "pcm":
+        return await _pcm_response(lang, service, payload)
+
     try:
         wav_bytes = await asyncio.to_thread(
             service.generate, payload.text, payload.instructions
@@ -180,3 +198,61 @@ async def tts(lang: str, payload: TTSRequest) -> TTSResponse:
         raise HTTPException(status_code=400, detail="Input produced no audio")
 
     return TTSResponse(audio_base64=base64.b64encode(wav_bytes).decode("ascii"))
+
+
+async def _pcm_response(
+    lang: str, service: BaseTTSService, payload: TTSRequest
+) -> Response:
+    """Raw PCM, streamed or whole.
+
+    The first chunk is synthesized before responding, so a failure up to then
+    still gets an error status.
+    """
+    chunks = service.stream(payload.text, payload.instructions)
+    first = await _next_chunk(lang, chunks)
+    if first is None:
+        raise HTTPException(status_code=400, detail="Input produced no audio")
+    rate, data = first
+    headers = {
+        "X-Sample-Rate": str(rate),
+        "X-Sample-Format": "s16le",
+        "X-Channels": "1",
+    }
+
+    if payload.stream:
+        return StreamingResponse(
+            _pcm_body(lang, data, chunks),
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+    pcm = bytearray(data)
+    while (chunk := await _next_chunk(lang, chunks)) is not None:
+        pcm += chunk[1]
+    return Response(bytes(pcm), media_type="application/octet-stream", headers=headers)
+
+
+async def _next_chunk(
+    lang: str, chunks: Iterator[tuple[int, bytes]]
+) -> tuple[int, bytes] | None:
+    try:
+        return await asyncio.to_thread(next, chunks, None)
+    except Exception as exc:
+        logger.exception("TTS failed for language: %s", lang)
+        raise HTTPException(status_code=500, detail="TTS processing failed") from exc
+
+
+async def _pcm_body(
+    lang: str, first: bytes, chunks: Iterator[tuple[int, bytes]]
+) -> AsyncIterator[bytes]:
+    try:
+        yield first
+        while (chunk := await asyncio.to_thread(next, chunks, None)) is not None:
+            yield chunk[1]
+    except Exception:
+        # The status is already sent; all we can do is end the audio early
+        logger.exception("TTS stream failed for language: %s", lang)
+    finally:
+        # Frees the provider's upstream connection if the client hung up.
+        # ValueError: a worker thread is still inside it; it closes on its own.
+        with contextlib.suppress(ValueError):
+            chunks.close()

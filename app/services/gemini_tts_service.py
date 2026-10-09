@@ -9,7 +9,7 @@ from google.genai import types
 
 from app.config import settings
 from app.services.base import BaseTTSService
-from app.utils.audio import pcm_to_wav
+from app.utils.audio import pcm_chunks_to_wav
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class GeminiTTSService(BaseTTSService):
     """Speech synthesis through the Gemini API.
 
     Uses the Interactions API, the one that takes a speech style
-    (`instructions`); its audio stream is collected into one clip.
+    (`instructions`); its audio stream is passed on as it arrives.
 
     `GEMINI_TTS_VOICE` is either a prebuilt voice name (e.g. "Kore") or the
     ID of a cloned voice created with `scripts/create_gemini_voice.py`.
@@ -61,6 +61,11 @@ class GeminiTTSService(BaseTTSService):
     # ------------------------------------------------------------------
 
     def generate(self, text: str, instructions: str | None = None) -> bytes:
+        return pcm_chunks_to_wav(self.stream(text, instructions))
+
+    def stream(
+        self, text: str, instructions: str | None = None
+    ) -> Iterator[tuple[int, bytes]]:
         if not self.ready or self.client is None:
             raise RuntimeError("Gemini TTS client is not initialized")
 
@@ -68,7 +73,7 @@ class GeminiTTSService(BaseTTSService):
         # the local model needs but Gemini handles natively.
         text = text.strip()
         if not text:
-            return b""
+            return
 
         speech_config = {"voice": settings.gemini_tts_voice}
         if settings.gemini_tts_language_code:
@@ -89,11 +94,12 @@ class GeminiTTSService(BaseTTSService):
             generation_config={"speech_config": [speech_config]},
             stream=True,
         )
-        chunks = list(_audio_chunks(events))
-        if not chunks:
+        received = False
+        for chunk in _audio_chunks(events):
+            received = True
+            yield chunk
+        if not received:
             raise RuntimeError("Gemini returned no audio")
-        sample_rate = chunks[0][0]
-        return pcm_to_wav(b"".join(data for _, data in chunks), f"rate={sample_rate}")
 
 
 def _audio_chunks(events) -> Iterator[tuple[int, bytes]]:
